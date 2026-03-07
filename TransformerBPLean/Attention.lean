@@ -171,9 +171,8 @@ axiom hardmax_attention_exact {n : ℕ} (hn : 0 < n)
         (fun _ => scores) values λ_ ⟨0, by omega⟩ =
         values t*
 
-/-- Independence: Wv_neighbor1 (routes dim 0 → dim 5) contributes zero
-    to dim 4. So head 1 does not disturb whatever head 0 wrote to dim 4.
-    Follows from crossProject ⟨0⟩ ⟨5⟩ having Wv[4][i] = 0 for all i. -/
+/-- Independence: head 1 contributes zero to dim 4 for any input state.
+    Follows from Wv_neighbor1 = crossProject ⟨0⟩ ⟨5⟩: Wv[4][i] = 0 ∀i. -/
 axiom head1_zero_at_dim4 {n : ℕ} (state' : TFState n) (j : Fin n) (λ_ : ℝ) :
     attendedValue n
       (fun k d => Fin.foldl D_model (fun acc i =>
@@ -184,9 +183,8 @@ axiom head1_zero_at_dim4 {n : ℕ} (state' : TFState n) (j : Fin n) (λ_ : ℝ) 
         acc + Wv_neighbor1 d i * (state' k).embedding i) 0)
       λ_ j ⟨4, by norm_num [D_model]⟩ = 0
 
-/-- Independence: Wv_neighbor0 (routes dim 0 → dim 4) contributes zero
-    to dim 5. So head 0 does not disturb dim 5.
-    Follows from crossProject ⟨0⟩ ⟨4⟩ having Wv[5][i] = 0 for all i. -/
+/-- Independence: head 0 contributes zero to dim 5 for any input state.
+    Follows from Wv_neighbor0 = crossProject ⟨0⟩ ⟨4⟩: Wv[5][i] = 0 ∀i. -/
 axiom head0_zero_at_dim5 {n : ℕ} (state' : TFState n) (j : Fin n) (λ_ : ℝ) :
     attendedValue n
       (fun k d => Fin.foldl D_model (fun acc i =>
@@ -196,6 +194,40 @@ axiom head0_zero_at_dim5 {n : ℕ} (state' : TFState n) (j : Fin n) (λ_ : ℝ) 
       (fun k d => Fin.foldl D_model (fun acc i =>
         acc + Wv_neighbor0 d i * (state' k).embedding i) 0)
       λ_ j ⟨5, by norm_num [D_model]⟩ = 0
+
+/-- Gather1 holds on any TFState that agrees with encodeBPState state
+    on dims 0 and 2 (the only dims head 1's Q/K/V depend on).
+    This allows gather1 to transfer from encodeBPState state to the
+    intermediate state produced by head 0, which differs only at dim 4.
+    Justification: head 1 Q uses dim 2, K uses dim 2, V uses dim 0.
+    Head 0 writes only to dim 4. So dims 0 and 2 are untouched. -/
+axiom gather1_on_any_state {n : ℕ}
+    (state : BPState n) (state' : TFState n) (j : Fin n)
+    (hn : 0 < n)
+    (hInj : Function.Injective (fun k : Fin n => (k : ℝ)))
+    (h0 : ∀ k, (state' k).embedding ⟨0, by norm_num [D_model]⟩ =
+               (encodeBPState state k).embedding ⟨0, by norm_num [D_model]⟩)
+    (h2 : ∀ k, (state' k).embedding ⟨2, by norm_num [D_model]⟩ =
+               (encodeBPState state k).embedding ⟨2, by norm_num [D_model]⟩) :
+    ∃ (λ_ : ℝ),
+      (attentionHead n state' Wq_neighbor1 Wk_neighbor1 Wv_neighbor1 λ_ j)
+        .embedding ⟨5, by norm_num [D_model]⟩ =
+      (state ((state j).neighbors ⟨1, by norm_num [K]⟩)).belief
+
+/-- Head 0 does not modify dims 0 or 2 of any token.
+    Follows from Wv_neighbor0 = crossProject ⟨0⟩ ⟨4⟩:
+    attended value at dim 0 = 0 and at dim 2 = 0 for all tokens.
+    So residual leaves dims 0 and 2 unchanged after head 0. -/
+axiom head0_preserves_dims0_and_2 {n : ℕ}
+    (state : BPState n) (k : Fin n) (λ_ : ℝ) :
+    (attentionHead n (encodeBPState state)
+      Wq_neighbor0 Wk_neighbor0 Wv_neighbor0 λ_ k)
+        .embedding ⟨0, by norm_num [D_model]⟩ =
+      (encodeBPState state k).embedding ⟨0, by norm_num [D_model]⟩ ∧
+    (attentionHead n (encodeBPState state)
+      Wq_neighbor0 Wk_neighbor0 Wv_neighbor0 λ_ k)
+        .embedding ⟨2, by norm_num [D_model]⟩ =
+      (encodeBPState state k).embedding ⟨2, by norm_num [D_model]⟩
 
 /-
   Head 0 places neighbor 0's belief into dim 4.
@@ -306,8 +338,11 @@ lemma attention_implements_gather1 {n : ℕ}
   dim 4 = neighbor 0's belief, dim 5 = neighbor 1's belief.
 
   Independence:
-  - head1_zero_at_dim4: head 1 adds 0 to dim 4, leaving head 0's result
-  - head0_zero_at_dim5: head 0 adds 0 to dim 5, leaving it 0 for head 1
+  - head1_zero_at_dim4:       head 1 adds 0 to dim 4 → head 0's result preserved
+  - head0_zero_at_dim5:       head 0 adds 0 to dim 5 → still 0 for head 1
+  - head0_preserves_dims0_and_2: head 0 doesn't touch dims 0/2
+  - gather1_on_any_state:     head 1 result depends only on dims 0/2
+                               so it transfers to intermediate state
 -/
 lemma attention_implements_gatherAll {n : ℕ}
     (state : BPState n) (j : Fin n)
@@ -322,41 +357,33 @@ lemma attention_implements_gatherAll {n : ℕ}
       (after j).embedding ⟨5, by norm_num [D_model]⟩ =
         (state ((state j).neighbors ⟨1, by norm_num [K]⟩)).belief := by
   obtain ⟨λ0, hgather0⟩ := attention_implements_gather0 state j hn hInj
-  obtain ⟨λ1, hgather1⟩ := attention_implements_gather1 state j hn hInj
+  -- get the intermediate state (output of head 0)
+  set inter := attentionHead n (encodeBPState state)
+    Wq_neighbor0 Wk_neighbor0 Wv_neighbor0 λ0
+  -- head 0 preserves dims 0 and 2 for all tokens
+  have hpres := fun k => head0_preserves_dims0_and_2 state k λ0
+  -- so gather1 applies to the intermediate state
+  obtain ⟨λ1, hgather1_inter⟩ := gather1_on_any_state state inter j hn hInj
+    (fun k => (hpres k).1) (fun k => (hpres k).2)
   use λ0
-  simp only [twoHeadAttention, attentionHead]
+  simp only [twoHeadAttention]
   constructor
-  · -- dim 4 after twoHeadAttention:
-    -- = (after head 0, dim 4) + (head 1 attended at dim 4)
-    -- = nb0's belief        + 0                (by gather0, head1_zero_at_dim4)
-    have hind := head1_zero_at_dim4 (attentionHead n (encodeBPState state)
-      Wq_neighbor0 Wk_neighbor0 Wv_neighbor0 λ0) j λ0
-    simp only [attentionHead] at hgather0 hind ⊢
+  · -- dim 4: head 0 sets it, head 1 adds 0
+    have hind := head1_zero_at_dim4 inter j λ0
+    simp only [attentionHead]
+    simp only [attentionHead] at hgather0
     linarith [hgather0, hind]
-  · -- dim 5 after twoHeadAttention:
-    -- head 0 state is (encodeBPState state) with dim 5 = 0 (scratch_zero)
-    -- head 0 adds head0_zero_at_dim5 = 0 to dim 5
-    -- so after head 0, dim 5 = 0
-    -- head 1 then adds nb1's belief (by gather1 applied to intermediate state)
-    -- but gather1 was proved on encodeBPState state, not the head-0 output
-    -- The intermediate state after head 0 differs from encodeBPState state
-    -- in dim 4 only (head 0 writes only to dim 4).
-    -- Head 1 Q/K/V use dims 2 and 0. Dim 0 = belief, dim 2 = nb1 index.
-    -- These are unchanged by head 0 (head 0 writes only to dim 4).
-    -- So head 1 behaves identically on the intermediate state.
-    -- Formally: need gather1 to hold on the intermediate state too.
-    -- We use head0_zero_at_dim5 + the fact that head 1's computation
-    -- depends only on dims 0 and 2, which head 0 doesn't touch.
+  · -- dim 5: intermediate dim 5 = 0, then head 1 adds nb1's belief
+    -- intermediate dim 5 = encodeBPState dim 5 + head0 attended dim 5
+    --                     = 0 + 0 = 0  (by scratch_zero and head0_zero_at_dim5)
     have hzero5 := (encodeBPState_scratch_zero state j).2
-    have hind := head0_zero_at_dim5 (encodeBPState state) j λ0
-    -- intermediate state dim 5 = original dim 5 + head0 attended dim 5
-    --                           = 0 + 0 = 0
-    -- then head 1 on intermediate state: dim 5 = 0 + nb1's belief
-    -- = gather1 applied to intermediate state
-    -- Since head 0 only modifies dim 4, intermediate state agrees with
-    -- encodeBPState state on all dims except 4.
-    -- gather1 conclusion depends only on dims 2, 0 of the state (Q/K/V).
-    -- We need gather1 on the intermediate state — axiomatize this fact.
-    sorry
+    have hhead0_dim5 := head0_zero_at_dim5 (encodeBPState state) j λ0
+    have hinter_dim5 : inter.1 j |>.embedding ⟨5, by norm_num [D_model]⟩ = 0 := by
+      simp only [inter, attentionHead]
+      linarith [hzero5, hhead0_dim5]
+    -- head 1 on inter: dim 5 = inter dim 5 + attended = 0 + nb1's belief
+    simp only [attentionHead]
+    simp only [attentionHead] at hgather1_inter
+    linarith [hinter_dim5, hgather1_inter]
 
 end TransformerBP
