@@ -3,10 +3,11 @@
 ## The Three Papers
 
 **Paper 1 — Coppola (2024): The Quantified Boolean Bayesian Network**
-Introduces the QBBN as a unified model of logical and probabilistic reasoning.
-Defines the factor graph structure (AND/OR boolean gates), the BP inference
-algorithm, and the π/λ message passing equations. Claims no hallucination
-because beliefs are determined by message passing from evidence.
+Introduces the QBBN as a unified model of logical and probabilistic
+reasoning. Defines the factor graph structure (AND/OR boolean gates),
+the BP inference algorithm, and the π/λ message passing equations.
+Claims no hallucination because beliefs are determined by message
+passing from evidence.
 
 **Paper 2 — Coppola (2026a): Statistical Parsing for Logical Information Retrieval**
 Shows how to parse natural language into QBBN logical forms. The pipeline
@@ -15,9 +16,9 @@ Provides the bridge from language to the graphical model.
 
 **Paper 3 — Coppola (2026b): The Universal Language: A Characteristica Universalis for AI**
 Proves that a transformer agent is Turing complete via Boolean circuit
-simulation (the universal-lean result). Frames the transformer as realizing
-Leibniz's characteristica universalis — a calculus of thought where
-reasoning is computation.
+simulation (the universal-lean result). Frames the transformer as
+realizing Leibniz's characteristica universalis — a calculus of thought
+where reasoning is computation.
 
 ## Where This Repo Fits
 
@@ -31,11 +32,11 @@ identifies as an open problem:
 
 The proof chain across the trilogy is:
 
-    Language → QBBN propositions    (Paper 2: parsing)
-    QBBN propositions → factor graph (Paper 1: graph construction)
+    Language → QBBN propositions      (Paper 2: parsing)
+    QBBN propositions → factor graph  (Paper 1: graph construction)
     Factor graph → transformer weights (this repo: construction)
-    Transformer weights → BP         (this repo: proof)
-    BP → posterior beliefs           (ECT + PCT theses)
+    Transformer weights → BP           (this repo: Lean proof)
+    BP → posterior beliefs             (ECT + PCT theses)
 
 The trilogy + this repo together give:
 
@@ -66,6 +67,55 @@ The first sense is about what the transformer CAN compute (universality).
 The second sense is about what the transformer DOES compute (semantics).
 Both are necessary for the full characteristica picture.
 
+## The Empirical Pillar: learner
+
+The `learner` repo provides the empirical counterpart to the formal
+results. Its findings are directly relevant to the trilogy's claims.
+
+**What learner shows:**
+
+A transformer learns to simulate Turing machines exactly via gradient
+descent, achieving 100% accuracy in 4 epochs:
+
+- tm0001 (binary incrementer): 100% in 4 epochs
+- tm0002 (binary decrementer): 100% in 4 epochs
+
+This is the empirical version of the top-left cell claim (Turing
+completeness). The formal result (universal-lean) says the weights
+exist. The empirical result (learner) says gradient descent finds them.
+
+**The encoding lesson:**
+
+The most important finding from learner is the encoding fix. For six
+consecutive experiments, carry accuracy was stuck at exactly 0.0%.
+Every training approach failed. The root cause was not training
+dynamics — it was a corrupted supervision signal. The tape encoding
+conflated "0" and "_" (blank), making the hardest carry transitions
+unlearnable by construction.
+
+Once the encoding correctly distinguished all three symbols, the model
+solved the task in 4 epochs from random initialization.
+
+**The implication for the formal result:**
+
+The encoding lesson directly parallels the formal proof. In
+`encodeBPState`, dims 4 and 5 start at exactly 0, neighbor indices
+are stored in distinct dimensions, and belief is in dim 0. The
+encoding is unambiguous by construction. The formal proof is correct
+because the encoding is correct. The learner result shows that
+ambiguous encodings silently corrupt learning — and that fixing them
+makes learning fast and complete.
+
+**What learner does not yet show:**
+
+learner proves TM simulation, not BP. The analogous experiment —
+training a transformer on QBBN factor graph inference and checking
+whether it learns BP — has not been run. This is the most important
+next experiment. If gradient descent finds BP weights as efficiently
+as it finds TM-simulation weights, that would be strong empirical
+support for the claim that real transformers doing reasoning are
+implicitly implementing something like BP.
+
 ## The Hallucination Explanation
 
 The trilogy gives a precise explanation of why LLMs hallucinate and
@@ -88,17 +138,25 @@ It gets the architecture right (transformer with iteration) but
 not the semantics (BP over a logical generative model).
 
 The formal proof in this repo makes the distinction precise:
-we exhibit the exact weights that make a transformer into a
-QBBN inference engine, and prove the correspondence in Lean.
+we exhibit the exact weights that make a transformer into a QBBN
+inference engine, and prove the correspondence in Lean.
+
+The learner result sharpens the picture further: a transformer given
+a clean, verifiable signal learns correct behavior exactly and quickly.
+The failure mode is not architectural — it is signal quality. LLMs
+trained on text prediction receive a signal that does not specifically
+reward Bayesian correctness, so they do not learn BP. A transformer
+trained specifically on QBBN inference tasks, with a verifiable reward
+signal, should learn BP weights. This is the empirical hypothesis.
 
 ## The Missing Link Before This Repo
 
 Before this repo, the trilogy had a gap:
 
-Paper 1 claims: BP computes correct posteriors over QBBN graphs
-Paper 3 claims: transformers can compute anything
+    Paper 1 claims: BP computes correct posteriors over QBBN graphs
+    Paper 3 claims: transformers can compute anything
 
-Neither paper shows: transformers compute BP over QBBN graphs
+    Neither paper shows: transformers compute BP over QBBN graphs
 
 This is the gap this repo fills. It is the connection that turns
 "transformers are universal" into "transformers are Bayesian reasoners
@@ -106,25 +164,34 @@ over a specific logical structure."
 
 ## What Comes Next
 
-The natural extensions suggested by this repo:
-
-**Fourth paper (empirical):**
-Train a transformer on QBBN inference tasks. Apply mechanistic
-interpretability (ACDC, activation patching) to find the learned circuit.
+**Immediate (empirical, learner):**
+Train a transformer on QBBN factor graph inference tasks using a
+verifiable reward signal (the BP fixed point as ground truth).
+Check whether learned accuracy matches the formal guarantee.
+Apply mechanistic interpretability to find the learned circuit.
 Compare to the constructed circuit in Attention.lean.
 If they match: gradient descent finds our construction.
-If they don't: characterize the gap.
+If they differ: characterize the gap — this is itself a result.
 
-**Fifth paper (existential quantification):**
+**Near term (formal):**
+State and prove the tree corollary (R6) as a single theorem combining
+`transformer_iterated_implements_runBP` with `hard-bp-lean`'s
+`bp_exact_on_tree`. This is the cleanest result in the trilogy and
+requires no empirical theses. Currently blocked only by the absence
+of a formal import between this repo and hard-bp-lean.
+
+**Medium term (existential quantification):**
 Extend the construction to handle existential quantification via
 Noisy OR aggregation heads. Show that the agent loop populates
 unsatisfied existentials through retrieval, and BP handles the
 inference. This closes the gap between the QBBN's closed-universe
 assumption and open-domain natural language reasoning.
 
-**Sixth paper (learning):**
+**Longer term (learning theory):**
 Show that the QBBN weights (Ψor parameters) can be learned from
 unlabeled text via expectation maximization, with the transformer
 running the E-step (BP inference) and gradient descent running the
-M-step (weight update). This is the learning algorithm that Paper 1
-identifies as future work.
+M-step (weight update). The learner experiments suggest this is
+feasible — once the signal is right, learning is fast. The question
+is whether the EM signal can be derived from text without explicit
+factor graph supervision.
