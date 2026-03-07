@@ -37,6 +37,11 @@ inductive NodeType
   deriving Repr, DecidableEq
 
 -- A factor graph node with belief and neighbor structure
+-- neighbors k holds the index of the k-th neighbor
+-- The message from neighbor k to j is directional:
+-- it is neighbor k's belief computed excluding j.
+-- For simplicity we model this as neighbor k's current belief,
+-- which is exact on trees where no echoing occurs.
 structure BPToken (n : ℕ) where
   nodeType    : NodeType
   belief      : ℝ
@@ -50,14 +55,20 @@ def BPState (n : ℕ) := Fin n → BPToken n
 /-
   Part 2: Transformer types
   A concrete transformer operating on real-valued token embeddings.
-  Each token has:
-  - A value embedding (carries the belief)
-  - A key embedding (used for attention lookup)
-  - A query embedding (used for attention lookup)
-  - A position encoding (identifies the token)
+
+  Embedding layout (D_model = 8 dimensions):
+    dim 0: belief (current probability estimate)
+    dim 1: neighbor 0's token index (for attention routing)
+    dim 2: neighbor 1's token index (for attention routing)
+    dim 3: node type (0 = variable, 1 = factor)
+    dim 4: scratch slot 0 (filled by head 0 attention)
+    dim 5: scratch slot 1 (filled by head 1 attention)
+    dim 6: reserved
+    dim 7: reserved
 -/
 
--- Embedding dimension
+-- Embedding dimension: 8 gives enough room for belief,
+-- two neighbor indices, node type, and two scratch slots
 def D_model : ℕ := 8
 
 -- A transformer token: real-valued embedding vector
@@ -95,7 +106,8 @@ noncomputable def attendedValue (n : ℕ)
       acc + softmax n (fun k => attentionScore (queries j) (keys k)) λ_ i
           * values i d) 0
 
--- One attention head: gather information from neighbors
+-- One attention head: gather information from one neighbor
+-- Returns a residual update to the embedding
 noncomputable def attentionHead (n : ℕ)
     (state : TFState n)
     (Wq Wk Wv : Fin D_model → Fin D_model → ℝ)
@@ -114,10 +126,26 @@ noncomputable def attentionHead (n : ℕ)
         (state j).embedding d +
         attendedValue n (fun _ => query) keys values λ_ j d }
 
+-- Apply two attention heads sequentially
+-- Head 0 gathers neighbor 0's belief into dim 4
+-- Head 1 gathers neighbor 1's belief into dim 5
+-- Each head uses a residual connection so earlier dims are preserved
+noncomputable def twoHeadAttention (n : ℕ)
+    (state : TFState n)
+    (Wq0 Wk0 Wv0 : Fin D_model → Fin D_model → ℝ)
+    (Wq1 Wk1 Wv1 : Fin D_model → Fin D_model → ℝ)
+    (λ_ : ℝ) : TFState n :=
+  attentionHead n
+    (attentionHead n state Wq0 Wk0 Wv0 λ_)
+    Wq1 Wk1 Wv1 λ_
+
 /-
   Part 4: Feed-forward network
   Two-layer MLP with ReLU activation.
   Applied independently to each token.
+  After attention, dim 4 holds neighbor 0's belief and
+  dim 5 holds neighbor 1's belief. The FFN reads these
+  and computes updateBelief, writing the result to dim 0.
 -/
 
 noncomputable def relu (x : ℝ) : ℝ := max 0 x
@@ -148,15 +176,30 @@ noncomputable def applyFFN (n : ℕ)
 
 /-
   Part 5: Full transformer forward pass
-  One attention head followed by one FFN layer.
-  This is the minimal transformer that can implement one round of BP.
+  Two attention heads (one per neighbor) followed by one FFN layer.
+  This is the minimal transformer that can implement one round of BP
+  for a factor graph with K=2 neighbors per node.
+
+  Architecture:
+    state
+      → head 0 (gather neighbor 0 belief → dim 4)
+      → head 1 (gather neighbor 1 belief → dim 5)
+      → FFN (compute updateBelief(dim4, dim5) → dim 0)
+    = one round of bp_forwardPass
 -/
 
 structure TransformerWeights where
-  Wq : Fin D_model → Fin D_model → ℝ
-  Wk : Fin D_model → Fin D_model → ℝ
-  Wv : Fin D_model → Fin D_model → ℝ
+  -- Head 0: gathers neighbor 0's belief into dim 4
+  Wq0 : Fin D_model → Fin D_model → ℝ
+  Wk0 : Fin D_model → Fin D_model → ℝ
+  Wv0 : Fin D_model → Fin D_model → ℝ
+  -- Head 1: gathers neighbor 1's belief into dim 5
+  Wq1 : Fin D_model → Fin D_model → ℝ
+  Wk1 : Fin D_model → Fin D_model → ℝ
+  Wv1 : Fin D_model → Fin D_model → ℝ
+  -- Shared temperature for both heads
   λ_ : ℝ
+  -- FFN: computes updateBelief from dims 4 and 5
   W1 : Fin D_model → Fin D_model → ℝ
   b1 : Fin D_model → ℝ
   W2 : Fin D_model → Fin D_model → ℝ
@@ -166,21 +209,23 @@ noncomputable def transformerForwardPass (n : ℕ)
     (weights : TransformerWeights)
     (state : TFState n) : TFState n :=
   applyFFN n weights.W1 weights.b1 weights.W2 weights.b2
-    (attentionHead n state weights.Wq weights.Wk weights.Wv weights.λ_)
+    (twoHeadAttention n state
+      weights.Wq0 weights.Wk0 weights.Wv0
+      weights.Wq1 weights.Wk1 weights.Wv1
+      weights.λ_)
 
 /-
   Part 6: The encoding/decoding bridge
-  To connect TFState to BPState we need:
-  - An encoding: BPState → TFState (beliefs → embeddings)
-  - A decoding: TFState → BPState (embeddings → beliefs)
-  - A weight construction: BPState → TransformerWeights
-    (weights that implement BP for this specific graph)
 -/
 
 -- Encode a BP state as a transformer state
--- The belief is stored in embedding dimension 0
--- Neighbor indices are stored in dimensions 1 and 2
--- Node type is stored in dimension 3 (0 = variable, 1 = factor)
+-- dim 0: belief
+-- dim 1: neighbor 0's index (for head 0 attention routing)
+-- dim 2: neighbor 1's index (for head 1 attention routing)
+-- dim 3: node type (0 = variable, 1 = factor)
+-- dim 4: scratch 0 (will be filled by head 0)
+-- dim 5: scratch 1 (will be filled by head 1)
+-- dim 6,7: reserved
 noncomputable def encodeBPState {n : ℕ}
     (state : BPState n) : TFState n :=
   fun j =>
@@ -194,8 +239,7 @@ noncomputable def encodeBPState {n : ℕ}
                     | NodeType.factor => 1
         | _ => 0 }
 
--- Decode a transformer state back to a BP state
--- Extracts belief from embedding dimension 0
+-- Decode: extract belief from dim 0
 noncomputable def decodeTFState {n : ℕ}
     (template : BPState n)
     (state : TFState n) : BPState n :=
@@ -204,27 +248,17 @@ noncomputable def decodeTFState {n : ℕ}
       belief := (state j).embedding ⟨0, by norm_num [D_model]⟩ }
 
 /-
-  Part 7: The main theorem (stated, proof is the work of this repo)
-
-  There exist transformer weights W such that for any BP state s:
-
-      decodeTFState s (transformerForwardPass n W (encodeBPState s))
-      = bp_forwardPass s
-
-  i.e. one transformer forward pass implements one round of BP.
+  Part 7: BP definitions (copied from hard-bp-lean)
 -/
 
--- BP belief update (from hard-bp-lean, copied for independence)
 noncomputable def updateBelief (m0 m1 : ℝ) : ℝ :=
   (m0 * m1) / (m0 * m1 + (1 - m0) * (1 - m1))
 
--- BP gather: copy neighbor beliefs into scratch
 noncomputable def bp_gatherAll {n : ℕ} (state : BPState n) : BPState n :=
   fun j =>
     { (state j) with
       scratch := fun k => (state ((state j).neighbors k)).belief }
 
--- BP compute: update belief from scratch
 noncomputable def bp_computeBeliefs {n : ℕ} (state : BPState n) : BPState n :=
   fun j =>
     match (state j).nodeType with
@@ -235,28 +269,40 @@ noncomputable def bp_computeBeliefs {n : ℕ} (state : BPState n) : BPState n :=
           ((state j).scratch ⟨1, by norm_num [K]⟩) }
     | NodeType.factor => state j
 
--- One round of BP
 noncomputable def bp_forwardPass {n : ℕ} (state : BPState n) : BPState n :=
   bp_computeBeliefs (bp_gatherAll state)
 
--- The main theorem: there exist weights that implement BP
--- Proof proceeds by constructing the weights explicitly and
--- verifying attention implements gatherAll and FFN implements
--- computeBeliefs
-theorem transformer_implements_bp (n : ℕ) (state : BPState n) :
+/-
+  Part 8: Main theorems
+-/
+
+-- The main theorem: there exist weights such that one transformer
+-- forward pass implements one round of BP.
+-- Proof: construct weights explicitly.
+--   Head 0: Wq0 extracts dim 1, Wk0 extracts dim 1, Wv0 extracts dim 0
+--           → softmax concentrates on neighbor 0, copies belief to dim 4
+--   Head 1: Wq1 extracts dim 2, Wk1 extracts dim 2, Wv1 extracts dim 0
+--           → softmax concentrates on neighbor 1, copies belief to dim 5
+--   FFN:    reads dim 4 and dim 5, computes updateBelief, writes to dim 0
+theorem transformer_implements_bp (n : ℕ) (state : BPState n)
+    (hn : 0 < n)
+    (hInj : Function.Injective (fun k : Fin n => (k : ℝ))) :
     ∃ (W : TransformerWeights),
       decodeTFState state
         (transformerForwardPass n W (encodeBPState state))
       = bp_forwardPass state := by
-  sorry -- construct W explicitly: attention for gatherAll, FFN for computeBeliefs
+  sorry -- construct W explicitly using attention_implements_gatherAll
+        -- and FFN implements updateBelief
 
 -- Corollary: T transformer forward passes = T rounds of BP
 theorem transformer_iterated_implements_runBP (n : ℕ)
-    (state : BPState n) (T : ℕ) :
+    (state : BPState n) (T : ℕ)
+    (hn : 0 < n)
+    (hInj : Function.Injective (fun k : Fin n => (k : ℝ))) :
     ∃ (W : TransformerWeights),
-      decodeTFState state
-        (transformerForwardPass n W)^[T] (encodeBPState state)
+      (fun s => decodeTFState state
+        (transformerForwardPass n W (encodeBPState s)))^[T] state
       = (bp_forwardPass^[T] state) := by
-  sorry -- follows from transformer_implements_bp by induction on T
+  sorry -- induction on T using transformer_implements_bp
 
 end TransformerBP
