@@ -1,1 +1,3 @@
 import TransformerBPLean.Preliminaries
+import TransformerBPLean.Attention
+import TransformerBPLean.TreeCorollary
